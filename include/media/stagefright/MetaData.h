@@ -212,7 +212,6 @@ enum {
     kTypeDivXVer_6,
 };
 enum {
-    kTypeWMA,
     kTypeWMAPro,
     kTypeWMALossLess,
 };
