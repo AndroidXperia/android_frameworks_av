@@ -23,15 +23,18 @@ LOCAL_SRC_FILES:=                         \
         AACWriter.cpp                     \
         AMRExtractor.cpp                  \
         AMRWriter.cpp                     \
+        ASFExtractor.cpp                  \
         AudioPlayer.cpp                   \
         AudioSource.cpp                   \
         AwesomePlayer.cpp                 \
+        AVIExtractor.cpp                  \
         CameraSource.cpp                  \
         CameraSourceTimeLapse.cpp         \
         DataSource.cpp                    \
         DRMExtractor.cpp                  \
         ESDS.cpp                          \
         FileSource.cpp                    \
+        FMRadioSource.cpp                 \
         FLACExtractor.cpp                 \
         HTTPBase.cpp                      \
         JPEGSource.cpp                    \
@@ -48,10 +51,12 @@ LOCAL_SRC_FILES:=                         \
         MediaSource.cpp                   \
         MetaData.cpp                      \
         NuCachedSource2.cpp               \
+        NuCachedFileSource2.cpp           \
         NuMediaExtractor.cpp              \
         OMXClient.cpp                     \
         OMXCodec.cpp                      \
         OggExtractor.cpp                  \
+        PCMExtractor.cpp                  \
         SampleIterator.cpp                \
         SampleTable.cpp                   \
         SkipCutBuffer.cpp                 \
@@ -68,11 +73,6 @@ LOCAL_SRC_FILES:=                         \
         XINGSeeker.cpp                    \
         avc_utils.cpp                     \
 
-ifeq ($(BOARD_USES_STE_FMRADIO),true)
-LOCAL_SRC_FILES+=                         \
-        FMRadioSource.cpp                 \
-        PCMExtractor.cpp
-endif
 
 ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
 LOCAL_SRC_FILES+=                         \
@@ -106,7 +106,8 @@ LOCAL_C_INCLUDES:= \
         $(TOP)/external/openssl/include \
         $(TOP)/hardware/qcom/display/libgralloc \
         $(TOP)/hardware/qcom/media/mm-core/inc \
-        $(TOP)/system/core/include
+        $(TOP)/system/core/include \
+        $(TOP)/vendor/st-ericsson/external/ASF_Library/include
 
 LOCAL_SHARED_LIBRARIES := \
         libbinder \
@@ -130,6 +131,7 @@ LOCAL_SHARED_LIBRARIES := \
         libutils \
         libvorbisidec \
         libz \
+        libhardware
 
 LOCAL_STATIC_LIBRARIES := \
         libstagefright_color_conversion \

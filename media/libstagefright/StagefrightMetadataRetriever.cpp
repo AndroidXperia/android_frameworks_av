@@ -34,6 +34,8 @@ Copyright (c) 2012, Code Aurora Forum. All rights reserved.
 #include <media/stagefright/MediaDefs.h>
 #include <cutils/properties.h>
 
+#include <sys/stat.h>
+
 namespace android {
 
 StagefrightMetadataRetriever::StagefrightMetadataRetriever()
@@ -88,7 +90,21 @@ status_t StagefrightMetadataRetriever::setDataSource(
         int fd, int64_t offset, int64_t length) {
     fd = dup(fd);
 
-    ALOGV("setDataSource(%d, %lld, %lld)", fd, offset, length);
+    // Get uri from fd (debug)
+    char uri[256];
+    snprintf(uri, sizeof(uri), "fd=%d", fd);// At least fd is traced
+
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer), "/proc/%d/fd/%d", gettid(), fd);
+    struct stat s;
+    if (lstat(buffer, &s) == 0) {
+        if ((s.st_mode & S_IFMT) == S_IFLNK) {
+            int len = readlink(buffer, uri, sizeof(uri));// Get uri from link
+            uri[len] = 0;
+        }
+    }
+
+    ALOGV("setDataSource(%d, %lld, %lld, %s)", fd, offset, length, uri);
 
     mParsedMetaData = false;
     mMetaData.clear();
@@ -99,6 +115,8 @@ status_t StagefrightMetadataRetriever::setDataSource(
 
     status_t err;
     if ((err = mSource->initCheck()) != OK) {
+       ALOGE("Unable to create data source for '%s'.", uri);
+
         mSource.clear();
 
         return err;
@@ -107,6 +125,8 @@ status_t StagefrightMetadataRetriever::setDataSource(
     mExtractor = MediaExtractor::Create(mSource);
 
     if (mExtractor == NULL) {
+       ALOGE("Unable to instantiate an extractor for '%s'.", uri);
+
         mSource.clear();
 
         return UNKNOWN_ERROR;
@@ -321,20 +341,22 @@ VideoFrame *StagefrightMetadataRetriever::getFrameAtTime(
     ALOGV("getFrameAtTime: %lld us option: %d", timeUs, option);
 
     if (mExtractor.get() == NULL) {
-        ALOGV("no extractor.");
+        ALOGW("no extractor.");
         return NULL;
     }
 
     sp<MetaData> fileMeta = mExtractor->getMetaData();
 
     if (fileMeta == NULL) {
-        ALOGV("extractor doesn't publish metadata, failed to initialize?");
+        ALOGW("extractor doesn't publish metadata for %s , failed to initialize?",
+             mSource->getCharUri());
         return NULL;
     }
 
     int32_t drm = 0;
     if (fileMeta->findInt32(kKeyIsDRM, &drm) && drm != 0) {
-        ALOGE("frame grab not allowed.");
+        ALOGE("frame grab not allowed. Failed to extract thumbnail for %s",
+             mSource->getCharUri());
         return NULL;
     }
 
@@ -352,7 +374,8 @@ VideoFrame *StagefrightMetadataRetriever::getFrameAtTime(
     }
 
     if (i == n) {
-        ALOGV("no video track found.");
+        ALOGW("no video track found. Failed to extract thumbnail for %s",
+             mSource->getCharUri());
         return NULL;
     }
 
@@ -362,7 +385,9 @@ VideoFrame *StagefrightMetadataRetriever::getFrameAtTime(
     sp<MediaSource> source = mExtractor->getTrack(i);
 
     if (source.get() == NULL) {
-        ALOGV("unable to instantiate video track.");
+        ALOGW("unable to instantiate video track. "
+             "Failed to extract thumbnail for %s",
+             mSource->getCharUri());
         return NULL;
     }
 
@@ -419,8 +444,8 @@ VideoFrame *StagefrightMetadataRetriever::getFrameAtTime(
 //    }
 #endif
     if (frame == NULL) {
-        ALOGV("Software decoder failed to extract thumbnail, "
-             "trying hardware decoder.");
+         ALOGV("Software decoder failed to extract thumbnail for %s, "
+             "trying hardware decoder.", mSource->getCharUri());
 
         int32_t flags = 0;
 #ifdef QCOM_HARDWARE
@@ -436,6 +461,16 @@ VideoFrame *StagefrightMetadataRetriever::getFrameAtTime(
         frame = extractVideoFrameWithCodecFlags(&mClient, trackMeta,
                     source, flags,
                     timeUs, option);
+        if (frame == NULL) {
+            ALOGE("Hardware decoder failed to extract thumbnail for %s",
+                 mSource->getCharUri());
+        } else {
+            ALOGV("Hardware decoder succeeded to extract thumbnail for %s",
+                 mSource->getCharUri());
+        }
+    } else {
+        ALOGV("Software decoder succeeded to extract thumbnail for %s",
+             mSource->getCharUri());
     }
     return frame;
 }

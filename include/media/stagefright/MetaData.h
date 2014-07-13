@@ -182,6 +182,14 @@ enum {
     kKeyCryptoIV          = 'cryI',  // uint8_t[16]
     kKeyCryptoMode        = 'cryM',  // int32_t
 
+#ifdef STE_HARDWARE
+    // To store the extracted metadata in VC1 streams
+    kKeyVC1Info = 'info',  //raw data
+
+    // To store the extracted metadata in WMA streams
+    kKeyWMAInfo = 'wmai', //raw data
+#endif
+
 #ifdef QCOM_HARDWARE
     //Extractor sets this
     kKeyUseArbitraryMode  = 'ArbM'  //bool (int32_t)
@@ -192,6 +200,10 @@ enum {
     kTypeESDS        = 'esds',
     kTypeAVCC        = 'avcc',
     kTypeD263        = 'd263',
+#ifdef STE_HARDWARE
+    kTypeVC1         = 'wmv3',
+    kTypeWMA         = 'wmau',
+#endif
 };
 enum {
     kTypeDivXVer_3_11,

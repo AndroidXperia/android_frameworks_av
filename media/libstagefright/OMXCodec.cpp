@@ -275,6 +275,8 @@ uint32_t OMXCodec::OmxToHALFormat(OMX_COLOR_FORMATTYPE omxValue) {
             return HAL_PIXEL_FORMAT_YCBCR42XMBN;
         case OMX_COLOR_FormatYUV420Planar:
             return HAL_PIXEL_FORMAT_YCbCr_420_P;
+        case OMX_COLOR_FormatYUV420SemiPlanar:
+            return HAL_PIXEL_FORMAT_YCbCr_420_SP;
         default:
             ALOGI("Unknown OMX pixel format (0x%X), passing it on unchanged", omxValue);
             return omxValue;
@@ -318,6 +320,10 @@ uint32_t OMXCodec::getComponentQuirks(
     if (list->codecHasQuirk(
                 index, "requires-store-metadata-before-idle")) {
       quirks |= kRequiresStoreMetaDataBeforeIdle;
+    }
+    if (list->codecHasQuirk(
+                index, "override-default-avc-profile")) {
+        quirks |= kOverrideDefaultAVCProfile;
     }
 #endif
 #ifdef QCOM_HARDWARE
@@ -590,6 +596,56 @@ status_t OMXCodec::parseAVCCodecSpecificData(
     return OK;
 }
 
+status_t OMXCodec::parseVC1CodecSpecificData(
+        const void *data, size_t size) {
+    static const uint32_t kVC1StartCode = 0x000001;
+    const uint8_t *ptr = (const uint8_t *)data;
+    uint32_t startCode = 0;
+
+    //************************************************************************************
+    // strf chunk of AVI stream has Sequence Header and Entry point Header which are     *
+    // specific to VC1-advanced profile stream                                           *
+    // --------------------------------------------------------------------------------- *
+    //                           'strf' Chunk                                            *
+    //         Sequence Header Start Code(SH)     --> 0x00 00 01 0f                      *
+    //         Entry Point Header Start Code(EPH) --> 0x00 00 01 0e                      *
+    // strf Chunk starts with 4 bytes of ChunkSize, 4 bytes of Width & 4 bytes of Height *
+    // followed by SH and EPH as shown below. Size of SH & EPH would not be part of      *
+    // stream data, needs to identify the same based on strf Chunk size                  *
+    // -----------------------------------------------------------------------           *
+    // |      |      |      |      |      |      |      |      |      |      |           *
+    // |  00  |  00  |  01  |  0f  |  xx  |  xx  |  xx  |  xx  |  xx  |  xx  |           *
+    // |      |      |      |      |      |      |      |      |      |      |           *
+    // -----------------------------------------------------------------------           *
+    // |      |      |      |      |      |      |      |      |      |      |           *
+    // |  00  |  00  |  01  |  0e  |  xx  |  xx  |  xx  |  xx  |  xx  |  xx  |           *
+    // |      |      |      |      |      |      |      |      |      |      |           *
+    // -----------------------------------------------------------------------           *
+    // minimum size should be less than 6 bytes as header is of 4 bytes                  *
+    // and atleast 1 byte of data. Checking for VC1 Start Code                           *
+    //***********************************************************************************/
+
+    startCode = (ptr[0] << 16) | (ptr[1] << 8) | ptr[2];
+    if (size < 6 || startCode != kVC1StartCode) {
+        return ERROR_MALFORMED;
+    }
+
+    // ReSync to the next start code to separate Sequence Header and Entry Point Header
+    uint32_t dataindex = 2;
+    uint32_t sizeOfSequenceHeader, sizeOfEntryPointHeader;
+    startCode = 0;
+    while (startCode != kVC1StartCode && dataindex < size) {
+        dataindex++;
+        startCode = (ptr[dataindex] << 16) | (ptr[dataindex + 1] << 8) |
+                ptr[dataindex + 2];
+    }
+    sizeOfSequenceHeader = dataindex;
+    addCodecSpecificData(ptr, sizeOfSequenceHeader);
+    sizeOfEntryPointHeader = size - dataindex;
+    addCodecSpecificData(ptr + dataindex, sizeOfEntryPointHeader);
+    return OK;
+}
+
 status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
     ALOGV("configureCodec protected=%d",
          (mFlags & kEnableGrallocUsageProtected) ? 1 : 0);
@@ -647,6 +703,22 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
 
             CHECK(meta->findData(kKeyVorbisBooks, &type, &data, &size));
             addCodecSpecificData(data, size);
+        } else if (meta->findData(kKeyWMAInfo, &type, &data, &size)) {
+            addCodecSpecificData(data, size);
+        } else if (meta->findData(kKeyVC1Info, &type, &data, &size)) {
+            status_t err;
+            // *************************************************************** *
+            // In case of VC-1 Advanced Profile, the following function shall  *
+            // parse the metadata, generate the codecSpecificData and push the *
+            // same into codecSpecificData List and return a OK                *
+            // In case of VC-1 Simple or Main Profile streams, the function    *
+            // returns an error code based on which the codecSpecificData      *
+            // generated by the extractor is directly pushed into the list.    *
+            // *************************************************************** *
+            err = parseVC1CodecSpecificData(data, size);
+            if (err != OK) {
+                addCodecSpecificData(data, size);
+            }
 #ifdef QCOM_HARDWARE
         } else if (meta->findData(kKeyRawCodecSpecificData, &type, &data, &size)) {
             ALOGV("OMXCodec::configureCodec found kKeyRawCodecSpecificData of size %d\n", size);
@@ -1487,14 +1559,14 @@ status_t OMXCodec::setupAVCEncoderParameters(const sp<MetaData>& meta) {
     h264type.eProfile = static_cast<OMX_VIDEO_AVCPROFILETYPE>(profileLevel.mProfile);
     h264type.eLevel = static_cast<OMX_VIDEO_AVCLEVELTYPE>(profileLevel.mLevel);
 
-#ifndef QCOM_HARDWARE
+    // Override the default AVC profile settings and take the parameters received from codec
     // XXX
-    if (h264type.eProfile != OMX_VIDEO_AVCProfileBaseline) {
+    if ((h264type.eProfile != OMX_VIDEO_AVCProfileBaseline) &&
+        (!(mQuirks & kOverrideDefaultAVCProfile))) {
         ALOGW("Use baseline profile instead of %d for AVC recording",
             h264type.eProfile);
         h264type.eProfile = OMX_VIDEO_AVCProfileBaseline;
     }
-#endif
 
     if (h264type.eProfile == OMX_VIDEO_AVCProfileBaseline) {
         h264type.nSliceHeaderSpacing = 0;
@@ -1561,6 +1633,8 @@ status_t OMXCodec::setVideoOutputFormat(
         compressionFormat = OMX_VIDEO_CodingVPX;
     } else if (!strcasecmp(MEDIA_MIMETYPE_VIDEO_MPEG2, mime)) {
         compressionFormat = OMX_VIDEO_CodingMPEG2;
+    } else if (!strcasecmp(MEDIA_MIMETYPE_VIDEO_VC1, mime)) {
+        compressionFormat = OMX_VIDEO_CodingWMV;
 #ifdef QCOM_HARDWARE
     } else if(!strcasecmp(MEDIA_MIMETYPE_VIDEO_DIVX, mime)) {
         compressionFormat = (OMX_VIDEO_CODINGTYPE)QOMX_VIDEO_CodingDivx;
@@ -1775,6 +1849,8 @@ void OMXCodec::setComponentRole(
             "audio_decoder.aac", "audio_encoder.aac" },
         { MEDIA_MIMETYPE_AUDIO_VORBIS,
             "audio_decoder.vorbis", "audio_encoder.vorbis" },
+        { MEDIA_MIMETYPE_AUDIO_WMA,
+            "audio_decoder.wmapro", "audio_encoder.wmapro" },
         { MEDIA_MIMETYPE_AUDIO_G711_MLAW,
             "audio_decoder.g711mlaw", "audio_encoder.g711mlaw" },
         { MEDIA_MIMETYPE_AUDIO_G711_ALAW,
@@ -2157,9 +2233,6 @@ status_t OMXCodec::applyRotation() {
 status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     // Get the number of buffers needed.
     OMX_PARAM_PORTDEFINITIONTYPE def;
-#ifdef QCOM_HARDWARE
-    int format;
-#endif
     InitOMXParams(&def);
     def.nPortIndex = kPortIndexOutput;
 
@@ -2169,82 +2242,11 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         return err;
     }
 
-    ALOGV("set_buffers_geometry w %lu, h %lu format %d",
-            def.format.video.nFrameWidth,
-            def.format.video.nFrameHeight,
-            def.format.video.eColorFormat);
-#ifdef QCOM_HARDWARE
-    format = def.format.video.eColorFormat;
-    if(def.format.video.eColorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar)
-      format = HAL_PIXEL_FORMAT_YCrCb_420_SP;
-
-#ifdef QCOM_ICS_COMPAT
-    if(def.format.video.eColorFormat == OMX_QCOM_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka)
-      format = HAL_PIXEL_FORMAT_YCbCr_420_SP_TILED;
-#endif
-#endif
-
-#ifndef EXYNOS4_ENHANCEMENTS
-    err = native_window_set_buffers_geometry(
-            mNativeWindow.get(),
-#ifdef QCOM_ICS_DECODERS
-            def.format.video.nStride,
-            def.format.video.nSliceHeight,
-#else
-            def.format.video.nFrameWidth,
-            def.format.video.nFrameHeight,
-#endif
-#ifdef QCOM_HARDWARE
-            format
-#else
-#ifdef STE_HARDWARE
-	    OmxToHALFormat(def.format.video.eColorFormat)
-#else
-            def.format.video.eColorFormat
-#endif
-#endif
-          );
-#else
-#include <sec_format.h>
-    OMX_COLOR_FORMATTYPE eColorFormat;
-
-    switch (def.format.video.eColorFormat) {
-    case OMX_SEC_COLOR_FormatNV12TPhysicalAddress:
-#ifdef S3D_SUPPORT
-    case OMX_SEC_COLOR_FormatNV12Tiled_SBS_LR:
-    case OMX_SEC_COLOR_FormatNV12Tiled_SBS_RL:
-    case OMX_SEC_COLOR_FormatNV12Tiled_TB_LR:
-    case OMX_SEC_COLOR_FormatNV12Tiled_TB_RL:
-#endif
-        eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_CUSTOM_YCbCr_420_SP_TILED;
-        break;
-    case OMX_COLOR_FormatYUV420SemiPlanar:
-#ifdef S3D_SUPPORT
-    case OMX_SEC_COLOR_FormatYUV420SemiPlanar_SBS_LR:
-    case OMX_SEC_COLOR_FormatYUV420SemiPlanar_SBS_RL:
-    case OMX_SEC_COLOR_FormatYUV420SemiPlanar_TB_LR:
-    case OMX_SEC_COLOR_FormatYUV420SemiPlanar_TB_RL:
-#endif
-        eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_SP;
-        break;
-#ifdef S3D_SUPPORT
-    case OMX_SEC_COLOR_FormatYUV420Planar_SBS_LR:
-    case OMX_SEC_COLOR_FormatYUV420Planar_SBS_RL:
-    case OMX_SEC_COLOR_FormatYUV420Planar_TB_LR:
-    case OMX_SEC_COLOR_FormatYUV420Planar_TB_RL:
-#endif
-    case OMX_COLOR_FormatYUV420Planar:
-    default:
-        eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_P;
-        break;
-    }
-
     err = native_window_set_buffers_geometry(
             mNativeWindow.get(),
             def.format.video.nFrameWidth,
             def.format.video.nFrameHeight,
-            eColorFormat);
-#endif
+	    OmxToHALFormat(def.format.video.eColorFormat));
 
     if (err != 0) {
         ALOGE("native_window_set_buffers_geometry failed: %s (%d)",
@@ -4415,6 +4417,47 @@ void OMXCodec::setG711Format(int32_t numChannels) {
     setRawAudioFormat(kPortIndexInput, 8000, numChannels);
 }
 
+status_t OMXCodec::setWMAFormat(const sp<MetaData> &meta) {
+    uint32_t type;
+    const void *data;
+    size_t size;
+
+    if (!mIsEncoder) {
+        if (meta->findData(kKeyWMAInfo, &type, &data, &size)) {
+
+            OMX_AUDIO_PARAM_WMAPROTYPE profile;
+            InitOMXParams(&profile);
+            profile.nPortIndex = kPortIndexInput;
+
+            status_t err = mOMX->getParameter(
+                    mNode, OMX_IndexParamAudioWMAPro, &profile, sizeof(profile));
+            CHECK_EQ(err, (status_t)OK);
+
+            int32_t numChannels   = U16LE_AT((uint8_t *)((uint8_t *)data + 2));
+            int32_t sampleRate    = U32LE_AT((uint8_t *)((uint8_t *)data + 4));
+            int32_t bitRate       = U32LE_AT((uint8_t *)((uint8_t *)data + 8));
+            int32_t blockAlign    = U16LE_AT((uint8_t *)((uint8_t *)data + 12));
+            int32_t bitsPerSample = U16LE_AT((uint8_t *)((uint8_t *)data + 14));
+            ALOGV("numChannels:%d, sampleRate:%d, bitRate:%d, blockAlign:%d, bitsPerSample:%d",
+                    numChannels, sampleRate, bitRate, blockAlign, bitsPerSample);
+
+            profile.nChannels     = numChannels;
+            profile.nSamplingRate = sampleRate;
+            profile.nBitRate      = bitRate;
+            profile.nBlockAlign   = blockAlign;
+            profile.nSourceBitsPerSample = bitsPerSample;
+
+            err = mOMX->setParameter(
+                    mNode, OMX_IndexParamAudioWMAPro, &profile, sizeof(profile));
+            if (err != OK) {
+                CODEC_LOGE("setParameter('OMX_IndexParamAudioWMAPro') failed (err = %d)", err);
+                return err;
+            }
+        }
+    }
+    return OK;
+}
+
 void OMXCodec::setImageOutputFormat(
         OMX_COLOR_FORMATTYPE format, OMX_U32 width, OMX_U32 height) {
     CODEC_LOGV("setImageOutputFormat(%ld, %ld)", width, height);
@@ -5068,6 +5111,7 @@ static const char *audioCodingTypeString(OMX_AUDIO_CODINGTYPE type) {
         "OMX_AUDIO_CodingWMA",
         "OMX_AUDIO_CodingRA",
         "OMX_AUDIO_CodingMIDI",
+        "OMX_AUDIO_CodingWMAPRO",
     };
 
     size_t numNames = sizeof(kNames) / sizeof(kNames[0]);
@@ -5448,6 +5492,9 @@ void OMXCodec::initOutputFormat(const sp<MetaData> &inputFormat) {
             } else if (video_def->eCompressionFormat == OMX_VIDEO_CodingAVC) {
                 mOutputFormat->setCString(
                         kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
+            } else if (video_def->eCompressionFormat == OMX_VIDEO_CodingWMV) {
+                mOutputFormat->setCString(
+                        kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_VC1);
             } else {
                 CHECK(!"Unknown compression format.");
             }
